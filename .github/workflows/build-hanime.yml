@@ -37,7 +37,7 @@ jobs:
             -dname "CN=Android Debug,O=Android,C=US"
 
       - name: Build hanime extension
-        run: ./gradlew :src:en:hanime:assembleAniyomiDebug
+        run: ./gradlew :src:en:hanime:assembleRelease
 
       - name: Find APK
         id: find-apk
