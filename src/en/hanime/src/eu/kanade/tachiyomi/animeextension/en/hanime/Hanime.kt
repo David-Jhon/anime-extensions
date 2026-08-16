@@ -181,7 +181,7 @@ class Hanime :
                     }
                 }.build()
 
-                val response = client.newCall(GET("$cdnBaseUrl/api/v10/search_hvs", searchHeaders)).await()
+                val response = client.newCall(GET("$SEARCH_API_URL", searchHeaders)).await()
                 val result = response.use { resp ->
                     val jsonLine = resp.body.string()
                     if (jsonLine.isEmpty()) {
@@ -1116,6 +1116,7 @@ class Hanime :
     companion object {
         private const val TAG = "Hanime"
         private const val DEFAULT_CDN_BASE_URL = "https://www.universal-cdn.com"
+        private const val SEARCH_API_URL = "https://guest.freeanimehentai.net/api/v11/search_hvs"
 
         private const val PREF_QUALITY_KEY = "preferred_quality"
         private const val PREF_QUALITY_DEFAULT = "1080p"
