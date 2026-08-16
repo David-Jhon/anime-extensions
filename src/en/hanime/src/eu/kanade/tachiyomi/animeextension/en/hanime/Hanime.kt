@@ -21,7 +21,7 @@ import keiyoushi.utils.bodyString
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parallelFlatMap
 import keiyoushi.utils.parseAs
-import keiyoushi.utils.useAsJsoup
+
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -412,17 +412,28 @@ class Hanime :
 
     // ── Anime Details ──────────────────────────────────────────────────
 
-    override fun animeDetailsParse(response: Response): SAnime {
-        val document = response.useAsJsoup()
+    override suspend fun getAnimeDetails(anime: SAnime): SAnime {
+        val slug = anime.url.substringAfterLast("/").substringBefore("?")
+        val signature = ensureSignatureProvider().getSignature()
+        val sigHeaders = headers.newBuilder().apply {
+            SignatureHeaders.build(signature).forEach { (key, value) -> add(key, value) }
+        }.build()
+
+        val responseString = client.newCall(
+            GET("$cdnBaseUrl/api/v8/video?id=$slug", sigHeaders),
+        ).await().bodyString().ifEmpty { return anime }
+
+        val videoModel = responseString.parseAs<VideoModel>()
+        val video = videoModel.hentaiVideo ?: return anime
         return SAnime.create().apply {
-            title = getTitle(document.select("h1.tv-title").text())
-            thumbnail_url = document.selectFirst("img.hvpi-cover")?.attr("src")
-            author = document.selectFirst("a.hvpimbc-text")?.text() ?: ""
-            description = document.select("div.hvpist-description p").joinToString("\n\n") { it.text() }
+            title = getTitle(video.name ?: "")
+            thumbnail_url = video.coverUrl ?: video.posterUrl
+            author = video.brand ?: ""
+            description = video.description ?: ""
             status = SAnime.UNKNOWN
-            genre = document.select("div.hvpis-text div.btn__content").joinToString { it.text() }
+            genre = videoModel.hentaiTags.mapNotNull { it.text }.joinToString { it }
             initialized = true
-            setUrlWithoutDomain(document.location())
+            setUrlWithoutDomain("https://hanime.tv/videos/hentai/${video.slug}?hvid=${video.id}")
         }
     }
 
@@ -457,32 +468,36 @@ class Hanime :
             }
         }
 
-        // Fallback: resolve hvId via CDN /api/v8/video
+        // Fallback: resolve hvId via CDN /api/v8/video using slug
         val slug = extractSlugFromUrl(episode.url)
-        val signature = ensureSignatureProvider().getSignature()
-        val sigHeaders = headers.newBuilder().apply {
-            SignatureHeaders.build(signature).forEach { (key, value) -> add(key, value) }
-        }.build()
+        if (slug.isNotEmpty()) {
+            val signature = ensureSignatureProvider().getSignature()
+            val sigHeaders = headers.newBuilder().apply {
+                SignatureHeaders.build(signature).forEach { (key, value) -> add(key, value) }
+            }.build()
 
-        val videoString = client.newCall(GET("$cdnBaseUrl/api/v8/video?id=$slug", sigHeaders)).await()
-            .bodyString()
-        if (videoString.isEmpty()) return emptyList()
+            val videoString = client.newCall(GET("$cdnBaseUrl/api/v8/video?id=$slug", sigHeaders)).await()
+                .bodyString()
+            if (videoString.isNotEmpty()) {
+                val videoModel = videoString.parseAs<VideoModel>()
+                val resolvedHvId = videoModel.hentaiVideo?.id
+                    ?: videoModel.videosManifest?.servers?.firstOrNull()?.streams?.firstOrNull()?.hvId
 
-        val videoModel = videoString.parseAs<VideoModel>()
-        val resolvedHvId = videoModel.hentaiVideo?.id
-            ?: videoModel.videosManifest?.servers?.firstOrNull()?.streams?.firstOrNull()?.hvId
+                if (resolvedHvId != null) {
+                    try {
+                        val manifestStreams = fetchManifestVideos(resolvedHvId, retryOnAuthFailure = true)
+                        if (manifestStreams.isNotEmpty()) return manifestStreams
+                    } catch (e: Exception) {
+                        Log.w(TAG, "fetchVideoListWithSignature() — API hvId manifest failed: ${e.javaClass.simpleName}: ${e.message}")
+                    }
+                }
 
-        if (resolvedHvId != null) {
-            try {
-                val manifestStreams = fetchManifestVideos(resolvedHvId, retryOnAuthFailure = true)
-                if (manifestStreams.isNotEmpty()) return manifestStreams
-            } catch (e: Exception) {
-                Log.w(TAG, "fetchVideoListWithSignature() — API hvId manifest failed: ${e.javaClass.simpleName}: ${e.message}")
+                // Final fallback: parse streams from API response without guest filter
+                return parseVideoModelStreamsUnfiltered(videoModel)
             }
         }
 
-        // Final fallback: parse manifest streams from API response without guest filter
-        return parseVideoModelStreamsUnfiltered(videoModel)
+        return emptyList()
     }
 
     /**
@@ -666,33 +681,37 @@ class Hanime :
             }
         }
 
-        // Fallback: resolve hvId from CDN /api/v8/video
+        // Fallback: resolve hvId from CDN /api/v8/video using slug
         val slug = extractSlugFromUrl(episode.url)
-        val signature = ensureSignatureProvider().getSignature()
-        val sigHeaders = headers.newBuilder().apply {
-            add("cookie", cookie)
-            SignatureHeaders.build(signature).forEach { (key, value) -> add(key, value) }
-        }.build()
+        if (slug.isNotEmpty()) {
+            val signature = ensureSignatureProvider().getSignature()
+            val sigHeaders = headers.newBuilder().apply {
+                add("cookie", cookie)
+                SignatureHeaders.build(signature).forEach { (key, value) -> add(key, value) }
+            }.build()
 
-        val responseString = client.newCall(
-            GET("$cdnBaseUrl/api/v8/video?id=$slug", sigHeaders),
-        ).await().bodyString().ifEmpty { return emptyList() }
+            val responseString = client.newCall(
+                GET("$cdnBaseUrl/api/v8/video?id=$slug", sigHeaders),
+            ).await().bodyString().ifEmpty { return emptyList() }
 
-        val videoModel = responseString.parseAs<VideoModel>()
+            val videoModel = responseString.parseAs<VideoModel>()
 
-        // Try CDN guest manifest first
-        val resolvedHvId = videoModel.hentaiVideo?.id
-        if (resolvedHvId != null) {
-            try {
-                val manifestStreams = fetchManifestVideos(resolvedHvId, retryOnAuthFailure = true)
-                if (manifestStreams.isNotEmpty()) return manifestStreams
-            } catch (_: Exception) {
-                Log.w(TAG, "fetchVideoListPremium() — manifest failed, falling back to streams")
+            // Try CDN guest manifest first
+            val resolvedHvId = videoModel.hentaiVideo?.id
+            if (resolvedHvId != null) {
+                try {
+                    val manifestStreams = fetchManifestVideos(resolvedHvId, retryOnAuthFailure = true)
+                    if (manifestStreams.isNotEmpty()) return manifestStreams
+                } catch (_: Exception) {
+                    Log.w(TAG, "fetchVideoListPremium() — manifest failed, falling back to streams")
+                }
             }
+
+            // Final fallback: parse manifest streams without guest filter
+            return parseVideoModelStreamsUnfiltered(videoModel)
         }
 
-        // Final fallback: parse manifest streams without guest filter
-        return parseVideoModelStreamsUnfiltered(videoModel)
+        return emptyList()
     }
 
     override fun List<Video>.sort(): List<Video> {
@@ -709,23 +728,11 @@ class Hanime :
 
     override suspend fun getEpisodeList(anime: SAnime): List<SEpisode> {
         val slug = anime.url.substringAfterLast("/").substringBefore("?")
-        val hvidParam = anime.url.substringAfter("hvid=", missingDelimiterValue = "").substringBefore("&")
-        val hvId = hvidParam.toLongOrNull()
 
         val signature = ensureSignatureProvider().getSignature()
         val sigHeaders = headers.newBuilder().apply {
             SignatureHeaders.build(signature).forEach { (key, value) -> add(key, value) }
         }.build()
-
-        // If we have the hvId directly, try manifest first (avoids the /api/v8/video call entirely)
-        if (hvId != null) {
-            try {
-                val manifestStreams = fetchManifestVideos(hvId, retryOnAuthFailure = true)
-                if (manifestStreams.isNotEmpty()) {
-                    // We need episode metadata — fall through to API call for franchise info
-                }
-            } catch (_: Exception) { }
-        }
 
         val responseString = client.newCall(
             GET("$cdnBaseUrl/api/v8/video?id=$slug", sigHeaders),
