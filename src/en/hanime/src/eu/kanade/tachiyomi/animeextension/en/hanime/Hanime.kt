@@ -87,7 +87,7 @@ class Hanime :
     private val signatureProviderMutex = Mutex()
 
     private suspend fun ensureSignatureProvider(): SignatureProvider {
-        // Fast path: check if provider exists and mode hasn't changed v2
+        // Fast path: check if provider exists and mode hasn't changed v3
         val currentProvider = signatureProvider
         val currentMode = preferences.getString(PREF_SIG_PROVIDER_KEY, PREF_SIG_PROVIDER_DEFAULT)!!
         if (currentProvider != null && currentMode == signatureProviderMode) {
