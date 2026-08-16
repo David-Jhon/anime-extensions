@@ -28,7 +28,7 @@ jobs:
       - name: Generate debug keystore
         run: |
           keytool -genkeypair -v \
-            -keystore debug.keystore \
+            -keystore signingkey.jks \
             -alias androiddebugkey \
             -keyalg RSA -keysize 2048 \
             -validity 10000 \
@@ -41,6 +41,10 @@ jobs:
 
       - name: Build hanime extension
         run: ./gradlew :src:en:hanime:assembleRelease
+        env:
+          KEY_STORE_PASSWORD: android
+          ALIAS: androiddebugkey
+          KEY_PASSWORD: android
 
       - name: Find APK
         id: find-apk
@@ -64,13 +68,18 @@ jobs:
           APK_PATH="${{ steps.find-apk.outputs.apk_path }}"
           APK_NAME="${{ steps.find-apk.outputs.apk_name }}"
 
+          # Extract signing certificate fingerprint
+          CERT_INFO=$(keytool -printcert -jarfile "$APK_PATH" 2>&1)
+          SHA256=$(echo "$CERT_INFO" | grep "SHA256:" | head -1 | awk '{print $NF}' | tr -d ':' | tr '[:upper:]' '[:lower:]')
+
+          echo "Signing SHA256: $SHA256"
+
           # Create repo branch content
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # Create the index.min.json
-          mkdir -p repo/apk
-          cp "$APK_PATH" repo/apk/
+          mkdir -p repo
+          cp "$APK_PATH" repo/
 
           cat > repo/index.min.json << 'EOF'
           [
@@ -95,6 +104,17 @@ jobs:
           EOF
 
           sed -i "s/APK_NAME_PLACEHOLDER/$APK_NAME/" repo/index.min.json
+
+          cat > repo/repo.json << EOF
+          {
+            "meta": {
+              "name": "yuzono-fix",
+              "shortName": "yuzono-fix",
+              "website": "https://github.com/David-Jhon/yuzono-fix",
+              "signingKeyFingerprint": "$SHA256"
+            }
+          }
+          EOF
 
           # Commit to repo branch
           git checkout --orphan repo
