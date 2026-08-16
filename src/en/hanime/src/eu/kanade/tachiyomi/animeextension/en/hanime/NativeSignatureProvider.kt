@@ -56,7 +56,7 @@ open class NativeSignatureProvider : SignatureProvider {
      */
     override suspend fun getSignature(): Signature {
         val t = timestampProvider()
-        val input = "${PREFIX}2${t}8${t}${SUFFIX}"
+        val input = "${PREFIX}2${t}8${t}$SUFFIX"
         val digest = MessageDigest.getInstance("SHA-256")
         val hashBytes = digest.digest(input.toByteArray(Charsets.UTF_8))
         val hex = hashBytes.joinToString("") { "%02x".format(it) }
