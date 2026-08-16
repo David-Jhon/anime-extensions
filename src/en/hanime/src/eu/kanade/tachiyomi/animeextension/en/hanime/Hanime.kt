@@ -152,7 +152,7 @@ class Hanime :
     private val searchCacheMutex = Mutex()
 
     /**
-     * Fetch or return cached search results from the v10 search API.
+     * Fetch or return cached search results from the v10 search API v3.
      * The API returns all content in a single response — pagination and
      * filtering are handled client-side.
      */
