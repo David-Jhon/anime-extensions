@@ -69,24 +69,26 @@ jobs:
           APK_NAME="${{ steps.find-apk.outputs.apk_name }}"
 
           # Extract signing certificate fingerprint
-          CERT_INFO=$(keytool -printcert -jarfile "$APK_PATH" 2>&1)
-          SHA256=$(echo "$CERT_INFO" | grep "SHA256:" | head -1 | awk '{print $NF}' | tr -d ':' | tr '[:upper:]' '[:lower:]')
+          CERT_INFO=$(keytool -printcert -jarfile "$APK_PATH" 2>&1 || true)
+          SHA256=$(echo "$CERT_INFO" | grep -i "SHA256:" | head -1 | sed 's/.*SHA256:\s*//' | tr -d ':' | tr '[:upper:]' '[:lower:]')
+
+          if [ -z "$SHA256" ]; then
+            echo "ERROR: Could not extract SHA256 fingerprint"
+            exit 1
+          fi
 
           echo "Signing SHA256: $SHA256"
 
-          # Create repo branch content
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # Build all repo files in a temp directory
+          mkdir -p /tmp/repo
+          cp "$APK_PATH" "/tmp/repo/$APK_NAME"
 
-          mkdir -p repo
-          cp "$APK_PATH" repo/
-
-          cat > repo/index.min.json << 'EOF'
+          cat > /tmp/repo/index.min.json << EOF
           [
             {
               "name": "Aniyomi: hanime.tv",
               "pkg": "eu.kanade.tachiyomi.animeextension.en.hanime",
-              "apk": "APK_NAME_PLACEHOLDER",
+              "apk": "$APK_NAME",
               "lang": "en",
               "code": 22,
               "version": "14.22",
@@ -103,9 +105,7 @@ jobs:
           ]
           EOF
 
-          sed -i "s/APK_NAME_PLACEHOLDER/$APK_NAME/" repo/index.min.json
-
-          cat > repo/repo.json << EOF
+          cat > /tmp/repo/repo.json << EOF
           {
             "meta": {
               "name": "yuzono-fix",
@@ -116,12 +116,15 @@ jobs:
           }
           EOF
 
-          # Commit to repo branch
+          # Push to repo branch
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
           git checkout --orphan repo
           git rm -rf . 2>/dev/null || true
-          git clean -fd 2>/dev/null || true
-          rm -rf *
-          cp -r repo/* .
+          rm -rf .github 2>/dev/null || true
+
+          cp /tmp/repo/* .
           git add .
           git commit -m "Update hanime extension"
           git push -f origin repo
