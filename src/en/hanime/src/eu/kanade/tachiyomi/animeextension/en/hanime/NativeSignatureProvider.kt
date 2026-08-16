@@ -3,33 +3,27 @@ package eu.kanade.tachiyomi.animeextension.en.hanime
 import java.security.MessageDigest
 
 /**
- * Signature provider that computes the hanime.tv signature natively via
+ * Signature provider that computes the hanime.tv CDN signature natively via
  * direct SHA-256 hashing, replacing WASM execution and WebView extraction.
  *
- * ## Algorithm
+ * ## Algorithm (app2 — for universal-cdn.com CDN endpoints)
  *
- * The hanime.tv API signature is computed as:
+ * The CDN API signature is computed as:
  * ```
- * SHA256("${timestamp},Xkdi29,https://hanime.tv,mn2,${timestamp}")
+ * SHA256("994482" + "2${t}8${t}" + "113")
  * ```
  *
- * Where:
- * - `timestamp` = `System.currentTimeMillis() / 1000L` (Unix seconds)
- * - `Xkdi29` = static salt embedded in the site's JavaScript
- * - `https://hanime.tv` = the origin/origin parameter
- * - `mn2` = static salt for the signature version
+ * Where `t` = `System.currentTimeMillis() / 1000L` (Unix seconds).
  *
  * The resulting 32-byte hash is formatted as a 64-character lowercase
  * hexadecimal string and sent as the `x-signature` header alongside
- * the timestamp in the `x-time` header.
+ * the timestamp in the `x-claim` header with `x-signature-version: app2`.
  *
  * ## Why this exists
  *
- * The original WASM binary (emscripten-compiled) computes this same hash,
- * but the Chicory WASM runtime stubs several JS environment functions
- * (`crypto.getRandomValues`, `performance.now`, etc.), causing the
- * WASM code to produce incorrect signatures. This provider bypasses
- * WASM entirely by computing the SHA-256 directly in the JVM.
+ * The extension targets `www.universal-cdn.com` CDN which requires the `app2`
+ * signature format. The old `web2` format (`SHA256("{t},Xkdi29,...")`) is only
+ * accepted by `hanime.tv` web endpoints and is rejected by the CDN with 403.
  *
  * ## Thread safety
  *
@@ -39,14 +33,11 @@ import java.security.MessageDigest
 open class NativeSignatureProvider : SignatureProvider {
 
     companion object {
-        /** First salt embedded in the hanime.tv signature algorithm. */
-        private const val SALT_1 = "Xkdi29"
+        /** Static prefix for the app2 signature algorithm. */
+        private const val PREFIX = "994482"
 
-        /** The origin value used in the signature input. */
-        private const val ORIGIN = "https://hanime.tv"
-
-        /** Second salt embedded in the hanime.tv signature algorithm. */
-        private const val SALT_2 = "mn2"
+        /** Static suffix for the app2 signature algorithm. */
+        private const val SUFFIX = "113"
     }
 
     override val name: String = "native"
@@ -58,18 +49,18 @@ open class NativeSignatureProvider : SignatureProvider {
     protected open val timestampProvider: () -> Long = { System.currentTimeMillis() / 1000L }
 
     /**
-     * Compute a fresh signature by hashing the current timestamp.
+     * Compute a fresh app2 signature by hashing the current timestamp.
      *
-     * The input format is: `{timestamp},{SALT_1},{ORIGIN},{SALT_2},{timestamp}`
+     * The input format is: `{PREFIX}2{t}8{t}{SUFFIX}`
      * The hash is SHA-256, formatted as 64 lowercase hex characters.
      */
     override suspend fun getSignature(): Signature {
-        val timestamp = timestampProvider()
-        val input = "$timestamp,$SALT_1,$ORIGIN,$SALT_2,$timestamp"
+        val t = timestampProvider()
+        val input = "${PREFIX}2${t}8${t}${SUFFIX}"
         val digest = MessageDigest.getInstance("SHA-256")
         val hashBytes = digest.digest(input.toByteArray(Charsets.UTF_8))
         val hex = hashBytes.joinToString("") { "%02x".format(it) }
-        return Signature(signature = hex, time = timestamp.toString())
+        return Signature(signature = hex, time = t.toString())
     }
 
     /** No resources to release — this is a no-op. */

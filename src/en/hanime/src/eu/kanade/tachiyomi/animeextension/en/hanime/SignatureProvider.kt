@@ -100,15 +100,17 @@ object SignatureHeaders {
     /**
      * Construct the full header map from a [Signature].
      *
-     * Includes the two dynamic signature headers (`x-signature`, `x-time`)
-     * plus the static headers that the server expects.
+     * Uses `app2` signature version headers compatible with `www.universal-cdn.com`:
+     * - `x-signature`: 64-char hex SHA-256 hash
+     * - `x-claim`: Unix timestamp (replaces old `x-time`)
+     * - `x-signature-version`: `app2` (replaces old `web2`)
      */
     fun build(signature: Signature): Map<String, String> {
         Log.d("SignatureProvider", "Building signature headers (length=${signature.signature.length})")
         return mapOf(
             "x-signature" to signature.signature,
-            "x-time" to signature.time,
-            "x-signature-version" to "web2",
+            "x-claim" to signature.time,
+            "x-signature-version" to "app2",
             "x-session-token" to "",
             "x-user-license" to "",
             "x-csrf-token" to "",

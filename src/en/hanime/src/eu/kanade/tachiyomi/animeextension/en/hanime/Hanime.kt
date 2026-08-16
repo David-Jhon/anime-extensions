@@ -68,8 +68,8 @@ class Hanime :
 
     /** Headers for video stream requests (m3u8, segments, AES key). */
     private fun videoHeaders(): Headers = headers.newBuilder()
-        .set("Referer", "https://player.hanime.tv/")
-        .set("Origin", "https://player.hanime.tv")
+        .set("Referer", "https://www.universal-cdn.com/")
+        .set("Origin", "https://www.universal-cdn.com")
         .build()
 
     @Volatile
@@ -1094,7 +1094,7 @@ class Hanime :
 
     companion object {
         private const val TAG = "Hanime"
-        private const val DEFAULT_CDN_BASE_URL = "https://cached.freeanimehentai.net"
+        private const val DEFAULT_CDN_BASE_URL = "https://www.universal-cdn.com"
 
         private const val PREF_QUALITY_KEY = "preferred_quality"
         private const val PREF_QUALITY_DEFAULT = "1080p"
