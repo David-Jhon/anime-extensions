@@ -616,7 +616,7 @@ class Hanime :
 
     override suspend fun getEpisodeList(anime: SAnime): List<SEpisode> {
         val slug = anime.url.substringAfterLast("/").substringBefore("?")
-        val hvid = anime.url.substringAfter("hvid=").substringBefore("&").toIntOrNull()
+        val hvid = anime.url.substringAfter("hvid=").substringBefore("&").toLongOrNull()
 
         // Use cached search data to avoid Cloudflare-blocked video endpoint
         val hits = fetchSearchHits()
