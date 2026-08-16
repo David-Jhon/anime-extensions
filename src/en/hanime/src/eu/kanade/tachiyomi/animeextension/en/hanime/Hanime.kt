@@ -412,6 +412,8 @@ class Hanime :
 
     // ── Anime Details ──────────────────────────────────────────────────
 
+    override fun animeDetailsParse(response: Response): SAnime = throw UnsupportedOperationException()
+
     override suspend fun getAnimeDetails(anime: SAnime): SAnime {
         val slug = anime.url.substringAfterLast("/").substringBefore("?")
         val signature = ensureSignatureProvider().getSignature()
@@ -431,7 +433,7 @@ class Hanime :
             author = video.brand ?: ""
             description = video.description ?: ""
             status = SAnime.UNKNOWN
-            genre = videoModel.hentaiTags.mapNotNull { it.text }.joinToString { it }
+            genre = videoModel.hentaiTags?.mapNotNull { it.text }?.joinToString { it } ?: ""
             initialized = true
             setUrlWithoutDomain("https://hanime.tv/videos/hentai/${video.slug}?hvid=${video.id}")
         }
@@ -725,6 +727,8 @@ class Hanime :
     }
 
     // ── Episode List ───────────────────────────────────────────────────
+
+    override fun episodeListParse(response: Response): List<SEpisode> = throw UnsupportedOperationException()
 
     override suspend fun getEpisodeList(anime: SAnime): List<SEpisode> {
         val slug = anime.url.substringAfterLast("/").substringBefore("?")
