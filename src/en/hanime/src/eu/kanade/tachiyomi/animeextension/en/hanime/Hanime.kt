@@ -87,7 +87,7 @@ class Hanime :
     private val signatureProviderMutex = Mutex()
 
     private suspend fun ensureSignatureProvider(): SignatureProvider {
-        // Fast path: check if provider exists and mode hasn't changed v3
+        // Fast path: check if provider exists and mode hasn't changed
         val currentProvider = signatureProvider
         val currentMode = preferences.getString(PREF_SIG_PROVIDER_KEY, PREF_SIG_PROVIDER_DEFAULT)!!
         if (currentProvider != null && currentMode == signatureProviderMode) {
@@ -262,7 +262,7 @@ class Hanime :
             status = SAnime.UNKNOWN
             genre = item.tags.joinToString { it }
             initialized = true
-            setUrlWithoutDomain("https://hanime.tv/videos/hentai/" + item.slug)
+            setUrlWithoutDomain("https://hanime.tv/videos/hentai/${item.slug}?hvid=${item.id}")
         }
     }
 
@@ -438,40 +438,43 @@ class Hanime :
     }
 
     /**
-     * Fetch video list using the manifest endpoint with WASM-generated signature headers.
+     * Fetch video list using the manifest endpoint with signature headers.
      *
      * Flow:
-     * 1. Call /api/v8/video?id={slug} to get the numeric hvId
+     * 1. Extract hvId from the episode URL (hanime://hvId=xxx format)
      * 2. Call the guest manifest endpoint with signature headers for real stream URLs
      * 3. Use PlaylistUtils to parse m3u8 playlists into properly-headed Video objects
-     * 4. Fall back to decoy streams from /api/v8/video if manifest fails
+     * 4. Fall back to CDN /api/v8/video if manifest fails
      */
     private suspend fun fetchVideoListWithSignature(episode: SEpisode): List<Video> {
-        // If hvid is embedded in the episode URL, skip the /api/v8/video call
-        val directHvId = extractHvIdFromUrl(episode.url)
-        if (directHvId != null) {
+        val hvId = extractHvIdFromUrl(episode.url)
+        if (hvId != null) {
             try {
-                val manifestStreams = fetchManifestVideos(directHvId, retryOnAuthFailure = true)
+                val manifestStreams = fetchManifestVideos(hvId, retryOnAuthFailure = true)
                 if (manifestStreams.isNotEmpty()) return manifestStreams
             } catch (e: Exception) {
-                Log.w(TAG, "fetchVideoListWithSignature() — directHvId manifest failed: ${e.javaClass.simpleName}: ${e.message}")
+                Log.w(TAG, "fetchVideoListWithSignature() — manifest failed: ${e.javaClass.simpleName}: ${e.message}")
             }
         }
 
-        // Fallback: resolve hvId via /api/v8/video (backward compatibility for single-episode URLs)
+        // Fallback: resolve hvId via CDN /api/v8/video
         val slug = extractSlugFromUrl(episode.url)
+        val signature = ensureSignatureProvider().getSignature()
+        val sigHeaders = headers.newBuilder().apply {
+            SignatureHeaders.build(signature).forEach { (key, value) -> add(key, value) }
+        }.build()
 
-        val videoString = client.newCall(GET("$baseUrl/api/v8/video?id=$slug", headers)).await()
+        val videoString = client.newCall(GET("$cdnBaseUrl/api/v8/video?id=$slug", sigHeaders)).await()
             .bodyString()
         if (videoString.isEmpty()) return emptyList()
 
         val videoModel = videoString.parseAs<VideoModel>()
-        val hvId = videoModel.hentaiVideo?.id
+        val resolvedHvId = videoModel.hentaiVideo?.id
             ?: videoModel.videosManifest?.servers?.firstOrNull()?.streams?.firstOrNull()?.hvId
 
-        if (hvId != null) {
+        if (resolvedHvId != null) {
             try {
-                val manifestStreams = fetchManifestVideos(hvId, retryOnAuthFailure = true)
+                val manifestStreams = fetchManifestVideos(resolvedHvId, retryOnAuthFailure = true)
                 if (manifestStreams.isNotEmpty()) return manifestStreams
             } catch (e: Exception) {
                 Log.w(TAG, "fetchVideoListWithSignature() — API hvId manifest failed: ${e.javaClass.simpleName}: ${e.message}")
@@ -652,58 +655,44 @@ class Hanime :
     private suspend fun fetchVideoListPremium(episode: SEpisode): List<Video> {
         val cookie = authCookie ?: return emptyList()
 
-        // If hvid is embedded in the episode URL, skip the HTML page parse
-        val directHvId = extractHvIdFromUrl(episode.url)
-        if (directHvId != null) {
-            try {
-                val manifestStreams = fetchManifestVideos(directHvId, retryOnAuthFailure = true)
-                if (manifestStreams.isNotEmpty()) return manifestStreams
-            } catch (_: Exception) {
-                // Fall through to HTML parsing below
-                Log.w(TAG, "fetchVideoListPremium() — directHvId manifest failed, falling back to HTML parsing")
-            }
-        }
-
-        // Fallback: resolve hvId from the HTML page (backward compatibility)
-        val slug = extractSlugFromUrl(episode.url)
-        val headers = headers.newBuilder().add("cookie", cookie)
-        val document = client.newCall(GET("$baseUrl/videos/hentai/$slug", headers = headers.build())).await().useAsJsoup()
-
-        val nuxtScript = document.selectFirst("script:containsData(__NUXT__)") ?: return emptyList()
-        val nuxtData = nuxtScript.data()
-            .substringAfter("__NUXT__=")
-            .substringBeforeLast(";")
-        val parsed = nuxtData.parseAs<WindowNuxt>()
-
-        // Try CDN guest manifest first — it has real Golem server streams (not Shiva decoys)
-        val hvId = parsed.state.data.video.hentaiVideo?.id
+        // Extract hvId from episode URL
+        val hvId = extractHvIdFromUrl(episode.url)
         if (hvId != null) {
             try {
                 val manifestStreams = fetchManifestVideos(hvId, retryOnAuthFailure = true)
                 if (manifestStreams.isNotEmpty()) return manifestStreams
             } catch (_: Exception) {
-                // Fall through to __NUXT__ streams below
-                Log.w(TAG, "fetchVideoListPremium() — NUXT hvId manifest failed, falling back to NUXT streams")
+                Log.w(TAG, "fetchVideoListPremium() — manifest failed, falling back to CDN")
+            }
+        }
+
+        // Fallback: resolve hvId from CDN /api/v8/video
+        val slug = extractSlugFromUrl(episode.url)
+        val signature = ensureSignatureProvider().getSignature()
+        val sigHeaders = headers.newBuilder().apply {
+            add("cookie", cookie)
+            SignatureHeaders.build(signature).forEach { (key, value) -> add(key, value) }
+        }.build()
+
+        val responseString = client.newCall(
+            GET("$cdnBaseUrl/api/v8/video?id=$slug", sigHeaders),
+        ).await().bodyString().ifEmpty { return emptyList() }
+
+        val videoModel = responseString.parseAs<VideoModel>()
+
+        // Try CDN guest manifest first
+        val resolvedHvId = videoModel.hentaiVideo?.id
+        if (resolvedHvId != null) {
+            try {
+                val manifestStreams = fetchManifestVideos(resolvedHvId, retryOnAuthFailure = true)
+                if (manifestStreams.isNotEmpty()) return manifestStreams
+            } catch (_: Exception) {
+                Log.w(TAG, "fetchVideoListPremium() — manifest failed, falling back to streams")
             }
         }
 
         // Final fallback: parse manifest streams without guest filter
-        val nuxtVideoModel = VideoModel(
-            videosManifest = VideosManifest(
-                servers = parsed.state.data.video.videosManifest.servers.map { nuxtServer ->
-                    Server(
-                        name = nuxtServer.name,
-                        streams = nuxtServer.streams.map { nuxtStream ->
-                            Stream(
-                                height = nuxtStream.height,
-                                url = nuxtStream.url,
-                            )
-                        },
-                    )
-                },
-            ),
-        )
-        return parseVideoModelStreamsUnfiltered(nuxtVideoModel)
+        return parseVideoModelStreamsUnfiltered(videoModel)
     }
 
     override fun List<Video>.sort(): List<Video> {
@@ -718,13 +707,30 @@ class Hanime :
 
     // ── Episode List ───────────────────────────────────────────────────
 
-    override fun episodeListRequest(anime: SAnime): Request {
-        val slug = anime.url.substringAfterLast("/")
-        return GET("$baseUrl/api/v8/video?id=$slug", headers)
-    }
+    override suspend fun getEpisodeList(anime: SAnime): List<SEpisode> {
+        val slug = anime.url.substringAfterLast("/").substringBefore("?")
+        val hvidParam = anime.url.substringAfter("hvid=", missingDelimiterValue = "").substringBefore("&")
+        val hvId = hvidParam.toLongOrNull()
 
-    override fun episodeListParse(response: Response): List<SEpisode> {
-        val responseString = response.bodyString().ifEmpty { return emptyList() }
+        val signature = ensureSignatureProvider().getSignature()
+        val sigHeaders = headers.newBuilder().apply {
+            SignatureHeaders.build(signature).forEach { (key, value) -> add(key, value) }
+        }.build()
+
+        // If we have the hvId directly, try manifest first (avoids the /api/v8/video call entirely)
+        if (hvId != null) {
+            try {
+                val manifestStreams = fetchManifestVideos(hvId, retryOnAuthFailure = true)
+                if (manifestStreams.isNotEmpty()) {
+                    // We need episode metadata — fall through to API call for franchise info
+                }
+            } catch (_: Exception) { }
+        }
+
+        val responseString = client.newCall(
+            GET("$cdnBaseUrl/api/v8/video?id=$slug", sigHeaders),
+        ).await().bodyString().ifEmpty { return emptyList() }
+
         val videoModel = responseString.parseAs<VideoModel>()
 
         val currentSeriesName = getTitle(videoModel.hentaiVideo?.name ?: "")
@@ -735,15 +741,13 @@ class Hanime :
             .filter { getTitle(it.name ?: "") == currentSeriesName }
 
         if (seriesVideos.isEmpty()) {
-            // No matching series found in franchise; return just the current video as a single episode
             val currentVideo = videoModel.hentaiVideo ?: return emptyList()
             return listOf(
                 SEpisode.create().apply {
                     episode_number = 1f
                     name = formatEpisodeTitle(currentVideo.name, currentSeriesName, 0, titleFormat)
                     date_upload = (currentVideo.releasedAtUnix ?: 0) * 1000
-                    val hvidParam = currentVideo.id?.let { id -> "&hvid=$id" } ?: ""
-                    setUrlWithoutDomain("$baseUrl/api/v8/video?id=${currentVideo.slug}$hvidParam")
+                    setUrlWithoutDomain("hanime://hvId=${currentVideo.id}")
                 },
             )
         }
@@ -753,22 +757,32 @@ class Hanime :
                 episode_number = idx + 1f
                 name = formatEpisodeTitle(it.name, currentSeriesName, idx, titleFormat)
                 date_upload = (it.releasedAtUnix ?: 0) * 1000
-                val hvidParam = it.id?.let { id -> "&hvid=$id" } ?: ""
-                url = "$baseUrl/api/v8/video?id=${it.slug}$hvidParam"
+                url = "hanime://hvId=${it.id}"
             }
         }.reversed()
     }
 
     // ── URL Helpers ───────────────────────────────────────────────────
 
-    /** Extract the `hvid` query parameter from an episode URL, or null if absent. */
+    /** Extract the `hvid` from an episode URL (hanime://hvId=xxx or &hvid=xxx format), or null if absent. */
     private fun extractHvIdFromUrl(url: String): Long? {
-        val hvidParam = url.substringAfter("&hvid=", missingDelimiterValue = "").substringBefore("&")
-        return hvidParam.toLongOrNull()
+        // New format: hanime://hvId=xxx
+        val newFormat = url.substringAfter("hvId=", missingDelimiterValue = "").substringBefore("&")
+        if (newFormat.isNotEmpty()) {
+            return newFormat.toLongOrNull()
+        }
+        // Legacy format: &hvid=xxx
+        val legacyFormat = url.substringAfter("&hvid=", missingDelimiterValue = "").substringBefore("&")
+        return legacyFormat.toLongOrNull()
     }
 
-    /** Extract the slug (id query parameter) from an episode URL. */
-    private fun extractSlugFromUrl(url: String): String = url.substringAfter("id=").substringBefore("&")
+    /** Extract the slug from an episode URL. */
+    private fun extractSlugFromUrl(url: String): String {
+        // New format: hanime://hvId=xxx — no slug available
+        if (url.startsWith("hanime://")) return ""
+        // Legacy format: ?id=slug or ?id=slug&hvid=xxx
+        return url.substringAfter("id=").substringBefore("&")
+    }
 
     // ── Auth ───────────────────────────────────────────────────────────
 
