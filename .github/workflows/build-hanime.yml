@@ -1,0 +1,104 @@
+name: Build Hanime Extension
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - 'src/en/hanime/**'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Generate debug keystore
+        run: |
+          keytool -genkeypair -v \
+            -keystore debug.keystore \
+            -alias androiddebugkey \
+            -keyalg RSA -keysize 2048 \
+            -validity 10000 \
+            -storepass android \
+            -keypass android \
+            -dname "CN=Android Debug,O=Android,C=US"
+
+      - name: Build hanime extension
+        run: ./gradlew :src:en:hanime:assembleAniyomiDebug
+
+      - name: Find APK
+        id: find-apk
+        run: |
+          APK_PATH=$(find src/en/hanime/build/outputs/apk -name "*.apk" | head -1)
+          APK_NAME=$(basename "$APK_PATH")
+          echo "apk_path=$APK_PATH" >> $GITHUB_OUTPUT
+          echo "apk_name=$APK_NAME" >> $GITHUB_OUTPUT
+          echo "Found APK: $APK_PATH"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: hanime-extension
+          path: ${{ steps.find-apk.outputs.apk_path }}
+          retention-days: 30
+
+      - name: Publish to repo branch
+        if: success()
+        run: |
+          APK_PATH="${{ steps.find-apk.outputs.apk_path }}"
+          APK_NAME="${{ steps.find-apk.outputs.apk_name }}"
+
+          # Create repo branch content
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Create the index.min.json
+          mkdir -p repo/apk
+          cp "$APK_PATH" repo/apk/
+
+          cat > repo/index.min.json << 'EOF'
+          [
+            {
+              "name": "Aniyomi: hanime.tv",
+              "pkg": "eu.kanade.tachiyomi.animeextension.en.hanime",
+              "apk": "APK_NAME_PLACEHOLDER",
+              "lang": "en",
+              "code": 22,
+              "version": "14.22",
+              "nsfw": 1,
+              "sources": [
+                {
+                  "name": "hanime.tv",
+                  "lang": "en",
+                  "id": "2649711761599612719",
+                  "baseUrl": "https://hanime.tv"
+                }
+              ]
+            }
+          ]
+          EOF
+
+          sed -i "s/APK_NAME_PLACEHOLDER/$APK_NAME/" repo/index.min.json
+
+          # Commit to repo branch
+          git checkout --orphan repo
+          git rm -rf . 2>/dev/null || true
+          git clean -fd 2>/dev/null || true
+          rm -rf *
+          cp -r repo/* .
+          git add .
+          git commit -m "Update hanime extension"
+          git push -f origin repo
